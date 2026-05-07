@@ -76,7 +76,7 @@ void setupBLE() {
   pAdvertising->setMinPreferred(0x06);
   BLEDevice::startAdvertising();
   
-  Serial.println("BLE actiu - 'TBeam-SOS'");
+  Serial.println("BLE actiu - 'TBeam-SOS-Toni_Alvaro'");
 }
 
 void sendSOS() {
@@ -151,8 +151,19 @@ void loop() {
       // PULSACIÓ DETECTADA → ENVIA SOS!
       Serial.println("PULSACIÓ DETECTADA → ENVIA SOS!");
       sendSOS();
-      delay(300);  // Anti-repeticions ràpides
+      delay(30);  // Anti-repeticions ràpides
     }
+
+    /*
+    Si se pulsa el boton se envia un mensaje a la pantalla OLED
+    y se muestra en el monitor serie que se ha mandado el mensaje.
+    */
+    if (reading != lastButtonState) {
+      oledMsg("Hola buenas!", "Pulsació detectada");
+      Serial.println("PULSACIÓ DETECTADA → Mensaje al usuario en OLED");
+      delay(30);
+    }
+    /**/
   }
   
   lastButtonState = reading;
