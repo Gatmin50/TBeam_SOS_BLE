@@ -17,6 +17,16 @@
 #define SERVICE_UUID        "12345678-1234-1234-1234-1234567890ab"
 #define CHARACTERISTIC_UUID "abcdefab-1234-5678-1234-abcdefabcdef"
 
+/*
+Pin para leer la alimentacion
+Arreglo del divisor de tension
+Voltaje de referencia del ADC
+*/
+#define nivel_alimentacion_pin 35
+#define factor_de_voltaje 2.0
+#define voltaje_orinetativo 3.3
+/**/
+
 SSD1306Wire display(OLED_ADDR, OLED_SDA, OLED_SCL);
 BLEServer *pServer = nullptr;
 BLECharacteristic *pCharacteristic = nullptr;
@@ -53,7 +63,7 @@ void oledMsg(const char* line1, const char* line2 = "", const char* line3 = "") 
 }
 
 void setupBLE() {
-  BLEDevice::init("TBeam-SOS-Toni_Alvaro");
+  BLEDevice::init("TBeam-SOS-Toni_Alvaro"); /*Nombre del dispositivo en app movil*/
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
   
@@ -106,6 +116,15 @@ void sendSOS() {
   oledMsg("T-Beam SOS", "Polsa botó", "BLE connectat");
 }
 
+/*Funcion para medir nivel de alimentación*/
+void nivel_alimentacion(){
+  int valor_adc = analogRead(nivel_alimentacion_pin);
+  float voltaje = (valor_adc / 4095.0) * voltaje_orinetativo * factor_de_voltaje;
+  Serial.print("Nivel de alimentación: ");
+  Serial.print(voltaje);
+  Serial.println(" V");
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -130,6 +149,8 @@ void setup() {
   Serial.println("- Notificacions ON");
   
   oledMsg("T-Beam SOS v3", "Polsa botó", "BLE preparat");
+  int rawValue = analogRead(35);
+  long mVolts = (long)rawValue * 5000 / 1024;
 }
 
 void loop() {
@@ -178,5 +199,8 @@ void loop() {
     } else {
       oledMsg("T-Beam SOS", "BLE BUSCANT", "BLE cercant");
     }
+    nivel_alimentacion();
+    Serial.println(mVolts);
+    /*Libreria xpower*/
   }
 }
