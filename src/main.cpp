@@ -53,7 +53,7 @@ void oledMsg(const char* line1, const char* line2 = "", const char* line3 = "") 
 }
 
 void setupBLE() {
-  BLEDevice::init("TBeam-SOS");
+  BLEDevice::init("TBeam-SOS-Toni_Alvaro");
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
   
