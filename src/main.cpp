@@ -7,73 +7,73 @@
 #include <BLE2902.h>
 #include <XPowersLib.h>
 #include <TinyGPS++.h>
-#include <time.h>
-#include <sys/time.h>
 
-#define BUTTON_PIN 38    // Botó usuari
-#define LED_PIN    4     // LED usuari
+// ==========================
+// CONFIGURACIÓN DE PINES
+// ==========================
+
+#define BUTTON_PIN 38
+#define LED_PIN    4
 
 #define OLED_SDA   21
 #define OLED_SCL   22
 #define OLED_ADDR  0x3C
 
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
+#define GPS_RX     34
+#define GPS_TX     12
+#define GPS_BAUD   9600
+
+// ==========================
+// CONFIGURACIÓN BLE PROFESOR
+// ==========================
+
+#define BLE_NAME "TBeam-SOS-Toni_Alvaro"
 
 #define SERVICE_UUID        "12345678-1234-1234-1234-1234567890ab"
 #define CHARACTERISTIC_UUID "abcdefab-1234-5678-1234-abcdefabcdef"
 
-// PMU XPower por I2C usando los mismos pines que la OLED
-#define PMU_SDA OLED_SDA
-#define PMU_SCL OLED_SCL
+// ==========================
+// OBJETOS GLOBALES
+// ==========================
 
-// GPS / GNSS LilyGO T-Beam
-#define GPS_RX   34
-#define GPS_TX   12
-#define GPS_BAUD 9600
-
-/*
-  Lectura antigua por ADC.
-  La dejamos como función de apoyo, pero para la entrega usamos XPower.
-*/
-#define nivel_alimentacion_pin 35
-#define factor_de_voltaje 2.0
-#define voltaje_orinetativo 3.3
-
-// Objetos globales XPower
-XPowersLibInterface *power = nullptr;
-bool powerOK = false;
-
-// Objetos globales GPS
-TinyGPSPlus gps;
-HardwareSerial GPSSerial(1);
-
-bool tiempoSincronizado = false;
-unsigned long ultimoCaracterGPS = 0;
-
-// Objetos globales OLED y BLE
 SSD1306Wire display(OLED_ADDR, OLED_SDA, OLED_SCL);
+
 BLEServer *pServer = nullptr;
 BLECharacteristic *pCharacteristic = nullptr;
 bool deviceConnected = false;
 
-// Prototipos
+XPowersLibInterface *power = nullptr;
+bool powerOK = false;
+
+TinyGPSPlus gps;
+HardwareSerial GPSSerial(1);
+
+// ==========================
+// PROTOTIPOS
+// ==========================
+
 void oledMsg(const char* line1, const char* line2 = "", const char* line3 = "");
 
+void setupOLED();
 void setupBLE();
-void sendSOS();
+void setupGPS();
 
 bool iniciarXPower();
 void configurarMedidasXPower();
 String leerBateriaTexto();
-void nivel_alimentacion();
 
-void setupGPS();
 void actualizarGPS();
+bool gpsDisponible();
 bool gpsTieneFixValido();
-void sincronizarTiempoDesdeGPS();
+bool gpsTieneHoraValida();
+
 String leerGPSTexto();
-String leerTiempoTexto();
+String leerTiempoGPSTexto();
+String crearMensajeSOS();
+
+bool botonPulsado();
+void sendSOS();
+void mostrarEstadoPeriodico();
 void imprimirDiagnosticoGPS();
 
 
@@ -82,13 +82,13 @@ void imprimirDiagnosticoGPS();
 // ==========================
 
 class MyServerCallbacks : public BLEServerCallbacks {
-  void onConnect(BLEServer* pServer) override { 
-    deviceConnected = true; 
+  void onConnect(BLEServer* pServer) override {
+    deviceConnected = true;
     Serial.println("BLE Client connectat");
   }
 
-  void onDisconnect(BLEServer* pServer) override { 
-    deviceConnected = false; 
+  void onDisconnect(BLEServer* pServer) override {
+    deviceConnected = false;
     Serial.println("BLE Client desconnectat");
     pServer->startAdvertising();
   }
@@ -99,23 +99,27 @@ class MyServerCallbacks : public BLEServerCallbacks {
 // OLED
 // ==========================
 
+void setupOLED() {
+  display.init();
+  display.flipScreenVertically();
+  display.setFont(ArialMT_Plain_10);
+
+  oledMsg("T-Beam SOS", "Iniciant...", "");
+}
+
 void oledMsg(const char* line1, const char* line2, const char* line3) {
   display.clear();
   display.setFont(ArialMT_Plain_10);
   display.setTextAlignment(TEXT_ALIGN_LEFT);
 
-  int y = 10;
-
-  display.drawString(0, y, line1);
-  y += 15;
+  display.drawString(0, 10, line1);
 
   if (strlen(line2) > 0) {
-    display.drawString(0, y, line2);
-    y += 15;
+    display.drawString(0, 25, line2);
   }
 
   if (strlen(line3) > 0) {
-    display.drawString(0, y, line3);
+    display.drawString(0, 40, line3);
   }
 
   display.display();
@@ -127,7 +131,7 @@ void oledMsg(const char* line1, const char* line2, const char* line3) {
 // ==========================
 
 void setupBLE() {
-  BLEDevice::init("TBeam-SOS-Toni_Alvaro");
+  BLEDevice::init(BLE_NAME);
 
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
@@ -152,7 +156,7 @@ void setupBLE() {
 
   BLEDevice::startAdvertising();
 
-  Serial.println("BLE actiu - 'TBeam-SOS-Toni_Alvaro'");
+  Serial.println("BLE actiu - '" BLE_NAME "'");
 }
 
 
@@ -160,25 +164,8 @@ void setupBLE() {
 // XPOWER / BATERÍA
 // ==========================
 
-void configurarMedidasXPower() {
-  if (power == nullptr) return;
-
-  power->disableTSPinMeasure();
-  power->enableBattDetection();
-  power->enableVbusVoltageMeasure();
-  power->enableBattVoltageMeasure();
-  power->enableSystemVoltageMeasure();
-
-  Serial.println("Mediciones XPower activadas");
-}
-
 bool iniciarXPower() {
-  /*
-    La LilyGO T-Beam puede montar distintas PMU según versión.
-    Probamos AXP2101 y después AXP192.
-  */
-
-  power = new XPowersAXP2101(Wire, PMU_SDA, PMU_SCL);
+  power = new XPowersAXP2101(Wire, OLED_SDA, OLED_SCL);
 
   if (power->init()) {
     Serial.println("PMU detectada: AXP2101");
@@ -189,7 +176,7 @@ bool iniciarXPower() {
   delete power;
   power = nullptr;
 
-  power = new XPowersAXP192(Wire, PMU_SDA, PMU_SCL);
+  power = new XPowersAXP192(Wire, OLED_SDA, OLED_SCL);
 
   if (power->init()) {
     Serial.println("PMU detectada: AXP192");
@@ -200,13 +187,25 @@ bool iniciarXPower() {
   delete power;
   power = nullptr;
 
-  Serial.println("ERROR: No se ha detectado PMU XPower");
+  Serial.println("ERROR: PMU XPower no detectada");
   return false;
+}
+
+void configurarMedidasXPower() {
+  if (power == nullptr) return;
+
+  power->disableTSPinMeasure();
+  power->enableBattDetection();
+  power->enableBattVoltageMeasure();
+  power->enableVbusVoltageMeasure();
+  power->enableSystemVoltageMeasure();
+
+  Serial.println("Mesures XPower activades");
 }
 
 String leerBateriaTexto() {
   if (!powerOK || power == nullptr) {
-    return "PWR=PMU_NO_DETECTADA";
+    return "BAT=NO_PMU";
   }
 
   uint16_t mVBat = power->getBattVoltage();
@@ -217,9 +216,7 @@ String leerBateriaTexto() {
   bool usbConectado = power->isVbusIn();
   bool cargando = power->isCharging();
 
-  String texto = "";
-
-  texto += "BAT=";
+  String texto = "BAT=";
 
   if (bateriaConectada && mVBat > 500) {
     texto += String(mVBat / 1000.0, 2);
@@ -252,60 +249,36 @@ String leerBateriaTexto() {
   return texto;
 }
 
-void nivel_alimentacion() {
-  int valor_adc = analogRead(nivel_alimentacion_pin);
-  float voltaje = (valor_adc / 4095.0) * voltaje_orinetativo * factor_de_voltaje;
 
-  Serial.print("Nivel de alimentacion ADC: ");
-  Serial.print(voltaje);
-  Serial.println(" V");
-}
-
-
-// ==========================
-// GPS + HORA DESDE GPS
-// ==========================
+/* ==========================
+  GPS
+========================== */ 
 
 void setupGPS() {
-  /*
-    GPS por UART1.
-    En la T-Beam habitual:
-    RX ESP32 = GPIO34
-    TX ESP32 = GPIO12
-  */
-
   GPSSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX, GPS_TX);
-
-  // Trabajamos en UTC porque el GPS entrega hora UTC
-  setenv("TZ", "UTC0", 1);
-  tzset();
-
   Serial.println("GPS iniciat a 9600 bauds");
 }
 
 void actualizarGPS() {
-  /*
-    Hay que llamar continuamente a esta función desde loop().
-    Lee los caracteres NMEA del GPS y los procesa con TinyGPSPlus.
-  */
-
   while (GPSSerial.available() > 0) {
-    char c = GPSSerial.read();
-    gps.encode(c);
-    ultimoCaracterGPS = millis();
+    gps.encode(GPSSerial.read());
+  }
+}
+
+bool gpsDisponible() {
+  /*
+    Si pasados 10 segundos no se ha recibido casi nada,
+    probablemente el GPS no está comunicando.
+  */
+  if (millis() > 10000 && gps.charsProcessed() < 10) {
+    return false;
   }
 
-  sincronizarTiempoDesdeGPS();
+  return true;
 }
 
 bool gpsTieneFixValido() {
-  /*
-    Para este proyecto decidimos:
-    si no hay posición GPS válida, tampoco aceptamos la hora.
-    Así evitamos fechas raras como 1999.
-  */
-
-  if (millis() > 10000 && gps.charsProcessed() < 10) {
+  if (!gpsDisponible()) {
     return false;
   }
 
@@ -320,66 +293,36 @@ bool gpsTieneFixValido() {
   return true;
 }
 
-void sincronizarTiempoDesdeGPS() {
+bool gpsTieneHoraValida() {
   /*
-    Solo sincronizamos la hora si:
-    1. El GPS tiene fix válido.
-    2. La fecha GPS es válida.
-    3. La hora GPS es válida.
-    4. El año es razonable.
+    Decisión del proyecto:
+    la hora solo se acepta cuando también hay fix GPS.
+    Así evitamos fechas falsas tipo 30/11/1999.
   */
 
   if (!gpsTieneFixValido()) {
-    tiempoSincronizado = false;
-    return;
+    return false;
   }
 
   if (!gps.date.isValid() || !gps.time.isValid()) {
-    tiempoSincronizado = false;
-    return;
+    return false;
   }
 
-  if (gps.date.age() > 5000 || gps.time.age() > 5000) {
-    tiempoSincronizado = false;
-    return;
+  if (gps.date.age() > 10000 || gps.time.age() > 10000) {
+    return false;
   }
 
   int year = gps.date.year();
 
-  // Filtro contra fechas falsas
   if (year < 2024 || year > 2035) {
-    tiempoSincronizado = false;
-    return;
+    return false;
   }
 
-  struct tm t;
-  memset(&t, 0, sizeof(t));
-
-  t.tm_year = gps.date.year() - 1900;
-  t.tm_mon  = gps.date.month() - 1;
-  t.tm_mday = gps.date.day();
-  t.tm_hour = gps.time.hour();
-  t.tm_min  = gps.time.minute();
-  t.tm_sec  = gps.time.second();
-
-  time_t epoch = mktime(&t);
-
-  // 01/01/2024 como fecha mínima aceptable
-  if (epoch < 1704067200) {
-    tiempoSincronizado = false;
-    return;
-  }
-
-  struct timeval tv;
-  tv.tv_sec = epoch;
-  tv.tv_usec = 0;
-
-  settimeofday(&tv, nullptr);
-  tiempoSincronizado = true;
+  return true;
 }
 
 String leerGPSTexto() {
-  if (millis() > 10000 && gps.charsProcessed() < 10) {
+  if (!gpsDisponible()) {
     return "GPS=NO_DATA";
   }
 
@@ -395,23 +338,10 @@ String leerGPSTexto() {
   return texto;
 }
 
-String leerTiempoTexto() {
-  /*
-    La hora solo se muestra si se ha obtenido desde GPS con fix válido.
-  */
-
-  if (!tiempoSincronizado) {
+String leerTiempoGPSTexto() {
+  if (!gpsTieneHoraValida()) {
     return "UTC=NO_SYNC";
   }
-
-  time_t ahora = time(nullptr);
-
-  if (ahora < 1704067200) {
-    return "UTC=NO_SYNC";
-  }
-
-  struct tm tiempoUTC;
-  gmtime_r(&ahora, &tiempoUTC);
 
   char buffer[40];
 
@@ -419,19 +349,19 @@ String leerTiempoTexto() {
     buffer,
     sizeof(buffer),
     "UTC=%02d/%02d/%04d,%02d:%02d:%02d",
-    tiempoUTC.tm_mday,
-    tiempoUTC.tm_mon + 1,
-    tiempoUTC.tm_year + 1900,
-    tiempoUTC.tm_hour,
-    tiempoUTC.tm_min,
-    tiempoUTC.tm_sec
+    gps.date.day(),
+    gps.date.month(),
+    gps.date.year(),
+    gps.time.hour(),
+    gps.time.minute(),
+    gps.time.second()
   );
 
   return String(buffer);
 }
 
 void imprimirDiagnosticoGPS() {
-  Serial.print("GPS chars procesados: ");
+  Serial.print("GPS chars: ");
   Serial.println(gps.charsProcessed());
 
   Serial.print("GPS satellites: ");
@@ -447,155 +377,17 @@ void imprimirDiagnosticoGPS() {
   } else {
     Serial.println("NO_VALID");
   }
-
-  Serial.print("GPS date raw: ");
-  if (gps.date.isValid()) {
-    Serial.print(gps.date.day());
-    Serial.print("/");
-    Serial.print(gps.date.month());
-    Serial.print("/");
-    Serial.println(gps.date.year());
-  } else {
-    Serial.println("NO_VALID");
-  }
-
-  Serial.print("GPS time raw: ");
-  if (gps.time.isValid()) {
-    Serial.print(gps.time.hour());
-    Serial.print(":");
-    Serial.print(gps.time.minute());
-    Serial.print(":");
-    Serial.println(gps.time.second());
-  } else {
-    Serial.println("NO_VALID");
-  }
 }
 
 
 // ==========================
-// ENVÍO SOS
+// BOTÓN
 // ==========================
 
-void sendSOS() {
-  digitalWrite(LED_PIN, LOW);
-
-  static int sosCount = 0;
-  sosCount++;
-
-  String bateria = leerBateriaTexto();
-  String gpsTexto = leerGPSTexto();
-  String tiempoTexto = leerTiempoTexto();
-
+bool botonPulsado() {
   /*
-    Conservamos la estructura base que ya os funcionaba:
-    SOS|contador|TS=segundos|TBEAM01
-    y añadimos GPS, UTC y batería al final.
-  */
-
-  String msg = "SOS|";
-  msg += String(sosCount);
-  msg += "|TS=";
-  msg += String(millis() / 1000);
-  msg += "|TBEAM01";
-  msg += "|";
-  msg += gpsTexto;
-  msg += "|";
-  msg += tiempoTexto;
-  msg += "|";
-  msg += bateria;
-
-  Serial.println("SOS #" + String(sosCount) + ": " + msg);
-
-  if (deviceConnected && pCharacteristic) {
-    pCharacteristic->setValue(msg.c_str());
-    pCharacteristic->notify();
-
-    Serial.println("Enviat per BLE!");
-
-    String linea2 = "#" + String(sosCount);
-    String linea3 = gpsTexto.substring(0, 20);
-
-    oledMsg("SOS ENVIAT!", linea2.c_str(), linea3.c_str());
-  } else {
-    Serial.println("!!!!Sense client BLE!!!!");
-
-    String linea2 = "#" + String(sosCount);
-    oledMsg("SOS CREAT!", linea2.c_str(), "Connecta app");
-  }
-
-  delay(500);
-  digitalWrite(LED_PIN, HIGH);
-
-  if (deviceConnected) {
-    oledMsg("T-Beam SOS", "BLE CONNECTAT", "Polsa boto");
-  } else {
-    oledMsg("T-Beam SOS", "BLE BUSCANT", "Connecta app");
-  }
-}
-
-
-// ==========================
-// SETUP
-// ==========================
-
-void setup() {
-  Serial.begin(115200);
-  delay(1000);
-
-  Serial.println("=== T-BEAM SOS v3 GPS + XPower ===");
-
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, HIGH);
-
-  pinMode(BUTTON_PIN, INPUT);
-
-  // I2C compartido por OLED y PMU
-  Wire.begin(OLED_SDA, OLED_SCL);
-
-  // OLED
-  display.init();
-  display.flipScreenVertically();
-  display.setFont(ArialMT_Plain_10);
-
-  oledMsg("T-Beam SOS v3", "GPS + XPower", "Iniciant...");
-
-  // XPower
-  powerOK = iniciarXPower();
-
-  if (powerOK) {
-    Serial.println(leerBateriaTexto());
-  } else {
-    Serial.println("Sistema continua sense lectura XPower");
-  }
-
-  // GPS
-  setupGPS();
-
-  // BLE
-  setupBLE();
-
-  Serial.println("PREPARAT!");
-  Serial.println("- Cada polsacio = 1 SOS");
-  Serial.println("- BLE notify actiu");
-  Serial.println("- GPS dona posicio i hora quan te fix");
-
-  oledMsg("T-Beam SOS v3", "Polsa boto", "BLE preparat");
-}
-
-
-// ==========================
-// LOOP
-// ==========================
-
-void loop() {
-  // Muy importante: leer GPS continuamente
-  actualizarGPS();
-
-  /*
-    Antirrebote correcto:
-    - lastReading guarda la última lectura física.
-    - buttonState guarda el estado estable.
-    - Solo enviamos SOS cuando pasa a LOW.
+    Antirrebote simple.
+    Devuelve true solo una vez cuando el botón pasa a LOW.
   */
 
   static bool lastReading = HIGH;
@@ -613,36 +405,155 @@ void loop() {
       buttonState = reading;
 
       if (buttonState == LOW) {
-        Serial.println("PULSACIO DETECTADA -> ENVIA SOS!");
-        sendSOS();
+        lastReading = reading;
+        return true;
       }
     }
   }
 
   lastReading = reading;
+  return false;
+}
 
-  // Estado cada 4 segundos
+
+// ==========================
+// SOS
+// ==========================
+
+String crearMensajeSOS() {
+  static int sosCount = 0;
+  sosCount++;
+
+  String msg = "SOS|";
+  msg += String(sosCount);
+
+  // Se conserva el timestamp simple que ya daba el profesor
+  msg += "|TS=";
+  msg += String(millis() / 1000);
+
+  // Identificador de la placa
+  msg += "|TBEAM01";
+
+  // Nuevos campos del proyecto
+  msg += "|";
+  msg += leerGPSTexto();
+
+  msg += "|";
+  msg += leerTiempoGPSTexto();
+
+  msg += "|";
+  msg += leerBateriaTexto();
+
+  return msg;
+}
+
+void sendSOS() {
+  digitalWrite(LED_PIN, LOW);
+
+  String msg = crearMensajeSOS();
+
+  Serial.print("SOS creat: ");
+  Serial.println(msg);
+
+  if (deviceConnected && pCharacteristic) {
+    pCharacteristic->setValue(msg.c_str());
+    pCharacteristic->notify();
+
+    Serial.println("Enviat per BLE!");
+
+    oledMsg("SOS ENVIAT!", "via BLE", leerGPSTexto().substring(0, 20).c_str());
+  } else {
+    Serial.println("Sense client BLE");
+
+    oledMsg("SOS CREAT!", "Connecta app", leerGPSTexto().substring(0, 20).c_str());
+  }
+
+  delay(500);
+  digitalWrite(LED_PIN, HIGH);
+}
+
+
+// ==========================
+// ESTADO PERIÓDICO
+// ==========================
+
+void mostrarEstadoPeriodico() {
   static unsigned long lastStatus = 0;
 
-  if (millis() - lastStatus > 4000) {
-    lastStatus = millis();
-
-    String bateria = leerBateriaTexto();
-    String gpsTexto = leerGPSTexto();
-    String tiempoTexto = leerTiempoTexto();
-
-    Serial.println(bateria);
-    Serial.println(gpsTexto);
-    Serial.println(tiempoTexto);
-    imprimirDiagnosticoGPS();
-
-    if (deviceConnected) {
-      oledMsg("T-Beam SOS", "BLE CONNECTAT", gpsTexto.substring(0, 20).c_str());
-    } else {
-      oledMsg("T-Beam SOS", "BLE BUSCANT", gpsTexto.substring(0, 20).c_str());
-    }
-
-    // Lectura antigua por ADC. Mejor comentada para no confundir.
-    // nivel_alimentacion();
+  if (millis() - lastStatus < 4000) {
+    return;
   }
+
+  lastStatus = millis();
+
+  String bateria = leerBateriaTexto();
+  String gpsTexto = leerGPSTexto();
+  String tiempoTexto = leerTiempoGPSTexto();
+
+  Serial.println("----- ESTAT -----");
+  Serial.println(bateria);
+  Serial.println(gpsTexto);
+  Serial.println(tiempoTexto);
+  imprimirDiagnosticoGPS();
+
+  if (deviceConnected) {
+    oledMsg("T-Beam SOS", "BLE CONNECTAT", gpsTexto.substring(0, 20).c_str());
+  } else {
+    oledMsg("T-Beam SOS", "BLE BUSCANT", gpsTexto.substring(0, 20).c_str());
+  }
+}
+
+
+// ==========================
+// SETUP
+// ==========================
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  Serial.println("=== T-BEAM SOS - BLE + GPS + XPower ===");
+
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, HIGH);
+
+  pinMode(BUTTON_PIN, INPUT);
+
+  Wire.begin(OLED_SDA, OLED_SCL);
+
+  setupOLED();
+
+  powerOK = iniciarXPower();
+
+  if (powerOK) {
+    Serial.println(leerBateriaTexto());
+  } else {
+    Serial.println("Sistema sense lectura XPower");
+  }
+
+  setupGPS();
+  setupBLE();
+
+  Serial.println("PREPARAT!");
+  Serial.println("- Cada polsacio = 1 SOS");
+  Serial.println("- BLE notify actiu");
+  Serial.println("- GPS dona coordenades i hora quan te fix");
+
+  oledMsg("T-Beam SOS", "Polsa boto", "BLE preparat");
+}
+
+
+// ==========================
+// LOOP
+// ==========================
+
+void loop() {
+  actualizarGPS();
+
+  if (botonPulsado()) {
+    Serial.println("PULSACIO DETECTADA -> ENVIA SOS!");
+    sendSOS();
+  }
+
+  mostrarEstadoPeriodico();
 }
