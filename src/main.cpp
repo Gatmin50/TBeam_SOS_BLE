@@ -12,6 +12,7 @@
 
 #define BUTTON_PIN 38    // Botó usuari
 #define LED_PIN    4     // LED usuari
+
 #define OLED_SDA   21
 #define OLED_SCL   22
 #define OLED_ADDR  0x3C
@@ -26,50 +27,60 @@
 #define PMU_SDA OLED_SDA
 #define PMU_SCL OLED_SCL
 
+// GPS / GNSS LilyGO T-Beam
+#define GPS_RX   34
+#define GPS_TX   12
+#define GPS_BAUD 9600
+
 /*
   Lectura antigua por ADC.
-  La mantenemos como apoyo, pero el apartado 3 lo hacemos con XPowersLib.
+  La dejamos como función de apoyo, pero para la entrega usamos XPower.
 */
 #define nivel_alimentacion_pin 35
 #define factor_de_voltaje 2.0
 #define voltaje_orinetativo 3.3
 
-// GPS / GNSS de la LilyGO T-Beam
-#define GPS_RX   34
-#define GPS_TX   12
-#define GPS_BAUD 9600
+// Objetos globales XPower
+XPowersLibInterface *power = nullptr;
+bool powerOK = false;
 
+// Objetos globales GPS
 TinyGPSPlus gps;
 HardwareSerial GPSSerial(1);
 
 bool tiempoSincronizado = false;
 unsigned long ultimoCaracterGPS = 0;
 
-// Objetos globales
-XPowersLibInterface *power = nullptr;
-bool powerOK = false;
-
+// Objetos globales OLED y BLE
 SSD1306Wire display(OLED_ADDR, OLED_SDA, OLED_SCL);
 BLEServer *pServer = nullptr;
 BLECharacteristic *pCharacteristic = nullptr;
 bool deviceConnected = false;
 
 // Prototipos
+void oledMsg(const char* line1, const char* line2 = "", const char* line3 = "");
+
+void setupBLE();
+void sendSOS();
+
 bool iniciarXPower();
+void configurarMedidasXPower();
 String leerBateriaTexto();
 void nivel_alimentacion();
 
 void setupGPS();
 void actualizarGPS();
-void sincronizarTiempoGPS();
+bool gpsTieneFixValido();
+void sincronizarTiempoDesdeGPS();
 String leerGPSTexto();
 String leerTiempoTexto();
+void imprimirDiagnosticoGPS();
 
-void setupBLE();
-void sendSOS();
-void oledMsg(const char* line1, const char* line2 = "", const char* line3 = "");
 
-// Callbacks BLE
+// ==========================
+// CALLBACKS BLE
+// ==========================
+
 class MyServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) override { 
     deviceConnected = true; 
@@ -83,12 +94,16 @@ class MyServerCallbacks : public BLEServerCallbacks {
   }
 };
 
+
+// ==========================
 // OLED
+// ==========================
+
 void oledMsg(const char* line1, const char* line2, const char* line3) {
   display.clear();
   display.setFont(ArialMT_Plain_10);
   display.setTextAlignment(TEXT_ALIGN_LEFT);
-  
+
   int y = 10;
 
   display.drawString(0, y, line1);
@@ -106,43 +121,48 @@ void oledMsg(const char* line1, const char* line2, const char* line3) {
   display.display();
 }
 
+
+// ==========================
 // BLE
+// ==========================
+
 void setupBLE() {
   BLEDevice::init("TBeam-SOS-Toni_Alvaro");
 
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
-  
+
   BLEService *pService = pServer->createService(SERVICE_UUID);
-  
+
   pCharacteristic = pService->createCharacteristic(
     CHARACTERISTIC_UUID,
     BLECharacteristic::PROPERTY_READ |
     BLECharacteristic::PROPERTY_NOTIFY
   );
-  
+
   pCharacteristic->addDescriptor(new BLE2902());
   pCharacteristic->setValue("READY");
-  
+
   pService->start();
-  
+
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
   pAdvertising->setScanResponse(true);
   pAdvertising->setMinPreferred(0x06);
 
   BLEDevice::startAdvertising();
-  
+
   Serial.println("BLE actiu - 'TBeam-SOS-Toni_Alvaro'");
 }
+
+
+// ==========================
+// XPOWER / BATERÍA
+// ==========================
 
 void configurarMedidasXPower() {
   if (power == nullptr) return;
 
-  /*
-    Activamos las mediciones internas de la PMU.
-    Sin esto puede devolver 0 mV aunque la placa esté alimentada.
-  */
   power->disableTSPinMeasure();
   power->enableBattDetection();
   power->enableVbusVoltageMeasure();
@@ -152,11 +172,10 @@ void configurarMedidasXPower() {
   Serial.println("Mediciones XPower activadas");
 }
 
-// XPower / PMU
 bool iniciarXPower() {
   /*
-    La LilyGO T-Beam puede montar distintas PMU según la versión.
-    Probamos primero AXP2101 y luego AXP192.
+    La LilyGO T-Beam puede montar distintas PMU según versión.
+    Probamos AXP2101 y después AXP192.
   */
 
   power = new XPowersAXP2101(Wire, PMU_SDA, PMU_SCL);
@@ -201,6 +220,7 @@ String leerBateriaTexto() {
   String texto = "";
 
   texto += "BAT=";
+
   if (bateriaConectada && mVBat > 500) {
     texto += String(mVBat / 1000.0, 2);
     texto += "V";
@@ -214,6 +234,7 @@ String leerBateriaTexto() {
   }
 
   texto += "|USB=";
+
   if (usbConectado || mVUsb > 1000) {
     texto += String(mVUsb / 1000.0, 2);
     texto += "V";
@@ -231,58 +252,105 @@ String leerBateriaTexto() {
   return texto;
 }
 
+void nivel_alimentacion() {
+  int valor_adc = analogRead(nivel_alimentacion_pin);
+  float voltaje = (valor_adc / 4095.0) * voltaje_orinetativo * factor_de_voltaje;
+
+  Serial.print("Nivel de alimentacion ADC: ");
+  Serial.print(voltaje);
+  Serial.println(" V");
+}
+
+
+// ==========================
+// GPS + HORA DESDE GPS
+// ==========================
+
 void setupGPS() {
   /*
-    GPS de la T-Beam por UART.
-    RX del ESP32 = GPIO34
-    TX del ESP32 = GPIO12
+    GPS por UART1.
+    En la T-Beam habitual:
+    RX ESP32 = GPIO34
+    TX ESP32 = GPIO12
   */
+
   GPSSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX, GPS_TX);
 
-  // Usamos UTC para evitar problemas de horario de verano
+  // Trabajamos en UTC porque el GPS entrega hora UTC
   setenv("TZ", "UTC0", 1);
   tzset();
 
   Serial.println("GPS iniciat a 9600 bauds");
 }
 
-
 void actualizarGPS() {
   /*
-    Esta función debe llamarse continuamente en loop().
-    Lee los caracteres NMEA que llegan del GPS y los pasa a TinyGPSPlus.
+    Hay que llamar continuamente a esta función desde loop().
+    Lee los caracteres NMEA del GPS y los procesa con TinyGPSPlus.
   */
+
   while (GPSSerial.available() > 0) {
     char c = GPSSerial.read();
     gps.encode(c);
     ultimoCaracterGPS = millis();
   }
 
-  sincronizarTiempoGPS();
+  sincronizarTiempoDesdeGPS();
 }
 
-
-void sincronizarTiempoGPS() {
+bool gpsTieneFixValido() {
   /*
-    Cuando el GPS tiene fecha y hora válidas, sincronizamos
-    el reloj interno del ESP32. Así el tiempo sigue avanzando
-    aunque durante unos segundos no lleguen nuevos datos GPS.
+    Para este proyecto decidimos:
+    si no hay posición GPS válida, tampoco aceptamos la hora.
+    Así evitamos fechas raras como 1999.
   */
+
+  if (millis() > 10000 && gps.charsProcessed() < 10) {
+    return false;
+  }
+
+  if (!gps.location.isValid()) {
+    return false;
+  }
+
+  if (gps.location.age() > 10000) {
+    return false;
+  }
+
+  return true;
+}
+
+void sincronizarTiempoDesdeGPS() {
+  /*
+    Solo sincronizamos la hora si:
+    1. El GPS tiene fix válido.
+    2. La fecha GPS es válida.
+    3. La hora GPS es válida.
+    4. El año es razonable.
+  */
+
+  if (!gpsTieneFixValido()) {
+    tiempoSincronizado = false;
+    return;
+  }
+
   if (!gps.date.isValid() || !gps.time.isValid()) {
+    tiempoSincronizado = false;
     return;
   }
 
   if (gps.date.age() > 5000 || gps.time.age() > 5000) {
+    tiempoSincronizado = false;
     return;
   }
 
-  static int ultimoSegundoSincronizado = -1;
+  int year = gps.date.year();
 
-  if (gps.time.second() == ultimoSegundoSincronizado) {
+  // Filtro contra fechas falsas
+  if (year < 2024 || year > 2035) {
+    tiempoSincronizado = false;
     return;
   }
-
-  ultimoSegundoSincronizado = gps.time.second();
 
   struct tm t;
   memset(&t, 0, sizeof(t));
@@ -296,6 +364,12 @@ void sincronizarTiempoGPS() {
 
   time_t epoch = mktime(&t);
 
+  // 01/01/2024 como fecha mínima aceptable
+  if (epoch < 1704067200) {
+    tiempoSincronizado = false;
+    return;
+  }
+
   struct timeval tv;
   tv.tv_sec = epoch;
   tv.tv_usec = 0;
@@ -304,23 +378,13 @@ void sincronizarTiempoGPS() {
   tiempoSincronizado = true;
 }
 
-
 String leerGPSTexto() {
-  /*
-    Devuelve latitud y longitud si hay posición válida.
-    Si no, devuelve un estado útil para depuración.
-  */
-
   if (millis() > 10000 && gps.charsProcessed() < 10) {
     return "GPS=NO_DATA";
   }
 
-  if (!gps.location.isValid()) {
+  if (!gpsTieneFixValido()) {
     return "GPS=NO_FIX";
-  }
-
-  if (gps.location.age() > 10000) {
-    return "GPS=OLD";
   }
 
   String texto = "GPS=";
@@ -331,12 +395,9 @@ String leerGPSTexto() {
   return texto;
 }
 
-
 String leerTiempoTexto() {
   /*
-    Devuelve fecha y hora UTC.
-    Formato:
-    UTC=DD/MM/YYYY,HH:MM:SS
+    La hora solo se muestra si se ha obtenido desde GPS con fix válido.
   */
 
   if (!tiempoSincronizado) {
@@ -344,11 +405,15 @@ String leerTiempoTexto() {
   }
 
   time_t ahora = time(nullptr);
-  struct tm tiempoUTC;
 
+  if (ahora < 1704067200) {
+    return "UTC=NO_SYNC";
+  }
+
+  struct tm tiempoUTC;
   gmtime_r(&ahora, &tiempoUTC);
 
-  char buffer[32];
+  char buffer[40];
 
   snprintf(
     buffer,
@@ -365,7 +430,52 @@ String leerTiempoTexto() {
   return String(buffer);
 }
 
-// SOS BLE
+void imprimirDiagnosticoGPS() {
+  Serial.print("GPS chars procesados: ");
+  Serial.println(gps.charsProcessed());
+
+  Serial.print("GPS satellites: ");
+  if (gps.satellites.isValid()) {
+    Serial.println(gps.satellites.value());
+  } else {
+    Serial.println("NO_VALID");
+  }
+
+  Serial.print("GPS HDOP: ");
+  if (gps.hdop.isValid()) {
+    Serial.println(gps.hdop.value());
+  } else {
+    Serial.println("NO_VALID");
+  }
+
+  Serial.print("GPS date raw: ");
+  if (gps.date.isValid()) {
+    Serial.print(gps.date.day());
+    Serial.print("/");
+    Serial.print(gps.date.month());
+    Serial.print("/");
+    Serial.println(gps.date.year());
+  } else {
+    Serial.println("NO_VALID");
+  }
+
+  Serial.print("GPS time raw: ");
+  if (gps.time.isValid()) {
+    Serial.print(gps.time.hour());
+    Serial.print(":");
+    Serial.print(gps.time.minute());
+    Serial.print(":");
+    Serial.println(gps.time.second());
+  } else {
+    Serial.println("NO_VALID");
+  }
+}
+
+
+// ==========================
+// ENVÍO SOS
+// ==========================
+
 void sendSOS() {
   digitalWrite(LED_PIN, LOW);
 
@@ -376,15 +486,23 @@ void sendSOS() {
   String gpsTexto = leerGPSTexto();
   String tiempoTexto = leerTiempoTexto();
 
+  /*
+    Conservamos la estructura base que ya os funcionaba:
+    SOS|contador|TS=segundos|TBEAM01
+    y añadimos GPS, UTC y batería al final.
+  */
+
   String msg = "SOS|";
   msg += String(sosCount);
-  msg += "|";
-  msg += tiempoTexto;
+  msg += "|TS=";
+  msg += String(millis() / 1000);
+  msg += "|TBEAM01";
   msg += "|";
   msg += gpsTexto;
   msg += "|";
+  msg += tiempoTexto;
+  msg += "|";
   msg += bateria;
-  msg += "|TBEAM01";
 
   Serial.println("SOS #" + String(sosCount) + ": " + msg);
 
@@ -415,22 +533,17 @@ void sendSOS() {
   }
 }
 
-// Lectura antigua por ADC, solo como comparación
-void nivel_alimentacion() {
-  int valor_adc = analogRead(nivel_alimentacion_pin);
-  float voltaje = (valor_adc / 4095.0) * voltaje_orinetativo * factor_de_voltaje;
 
-  Serial.print("Nivel de alimentacion ADC: ");
-  Serial.print(voltaje);
-  Serial.println(" V");
-}
+// ==========================
+// SETUP
+// ==========================
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  
-  Serial.println("=== T-BEAM SOS v3 (cada polsacio) ===");
-  
+
+  Serial.println("=== T-BEAM SOS v3 GPS + XPower ===");
+
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, HIGH);
 
@@ -438,15 +551,15 @@ void setup() {
 
   // I2C compartido por OLED y PMU
   Wire.begin(OLED_SDA, OLED_SCL);
-  
+
   // OLED
   display.init();
   display.flipScreenVertically();
   display.setFont(ArialMT_Plain_10);
 
-  oledMsg("T-Beam SOS v3", "Sense GPS", "Iniciant...");
+  oledMsg("T-Beam SOS v3", "GPS + XPower", "Iniciant...");
 
-  // Inicialización XPower
+  // XPower
   powerOK = iniciarXPower();
 
   if (powerOK) {
@@ -455,43 +568,50 @@ void setup() {
     Serial.println("Sistema continua sense lectura XPower");
   }
 
+  // GPS
   setupGPS();
-  
+
+  // BLE
   setupBLE();
-  
+
   Serial.println("PREPARAT!");
   Serial.println("- Cada polsacio = 1 SOS");
-  Serial.println("- nRF Connect / LightBlue -> TBeam-SOS-Toni_Alvaro");
-  Serial.println("- Notificacions ON");
-  
+  Serial.println("- BLE notify actiu");
+  Serial.println("- GPS dona posicio i hora quan te fix");
+
   oledMsg("T-Beam SOS v3", "Polsa boto", "BLE preparat");
 }
 
+
+// ==========================
+// LOOP
+// ==========================
+
 void loop() {
+  // Muy importante: leer GPS continuamente
+  actualizarGPS();
+
   /*
     Antirrebote correcto:
-    - lastReading guarda la última lectura física del pin.
-    - buttonState guarda el estado estable del botón.
-    - Solo enviamos SOS cuando el estado estable pasa a LOW.
+    - lastReading guarda la última lectura física.
+    - buttonState guarda el estado estable.
+    - Solo enviamos SOS cuando pasa a LOW.
   */
-  actualizarGPS();
+
   static bool lastReading = HIGH;
   static bool buttonState = HIGH;
   static unsigned long lastDebounceTime = 0;
 
   bool reading = digitalRead(BUTTON_PIN);
 
-  // Si cambia la lectura física, reiniciamos el temporizador de rebote
   if (reading != lastReading) {
     lastDebounceTime = millis();
   }
 
-  // Si la lectura se mantiene estable más de 50 ms, aceptamos el cambio
   if ((millis() - lastDebounceTime) > 50) {
     if (reading != buttonState) {
       buttonState = reading;
 
-      // Botón activo a LOW: solo enviamos SOS al pulsar, no al soltar
       if (buttonState == LOW) {
         Serial.println("PULSACIO DETECTADA -> ENVIA SOS!");
         sendSOS();
@@ -501,7 +621,7 @@ void loop() {
 
   lastReading = reading;
 
-  // Estado BLE y batería cada 4 segundos
+  // Estado cada 4 segundos
   static unsigned long lastStatus = 0;
 
   if (millis() - lastStatus > 4000) {
@@ -514,14 +634,15 @@ void loop() {
     Serial.println(bateria);
     Serial.println(gpsTexto);
     Serial.println(tiempoTexto);
-
-    Serial.print("GPS chars procesados: ");
-    Serial.println(gps.charsProcessed());
+    imprimirDiagnosticoGPS();
 
     if (deviceConnected) {
       oledMsg("T-Beam SOS", "BLE CONNECTAT", gpsTexto.substring(0, 20).c_str());
     } else {
       oledMsg("T-Beam SOS", "BLE BUSCANT", gpsTexto.substring(0, 20).c_str());
     }
+
+    // Lectura antigua por ADC. Mejor comentada para no confundir.
+    // nivel_alimentacion();
   }
 }
