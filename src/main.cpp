@@ -85,8 +85,8 @@ String getGPSInfo() {
   char buf[40]; // Creamos un espacio temporal en memoria para montar la frase
   // Formateamos las variables del GPS en el texto (%.5f = float de 5 decimales, %02d = entero de 2 dígitos)
   snprintf(buf, sizeof(buf), "%.5f,%.5f %02d:%02d:%02d", 
-           gps.location.lat(), gps.location.lng(), 
-           gps.time.hour(), gps.time.minute(), gps.time.second());
+            gps.location.lat(), gps.location.lng(), 
+            gps.time.hour(), gps.time.minute(), gps.time.second());
   return String(buf);
 }
 
@@ -101,7 +101,7 @@ String getPowerInfo() {
 
 // ---------- CONFIGURACIÓN DEL BLUETOOTH ----------
 void setupBLE() {
-  BLEDevice::init("TBeam-SOS"); // Inicializa el chip BLE y le pone el nombre que verás en el móvil
+  BLEDevice::init("TBeam-SOS-Alavaro-Toni"); // Inicializa el chip BLE y le pone el nombre que verás en el móvil
   pServer = BLEDevice::createServer(); // Crea el servidor
   pServer->setCallbacks(new MyServerCallbacks()); // Le asigna las reglas de conexión que creamos arriba
   
@@ -181,14 +181,21 @@ void setup() {
   oledMsg("T-Beam SOS v3", "Iniciant calul...", "Espera..."); 
   
   // Inicialización del chip de energía de la batería
-  // Los T-Beam nuevos traen el chip AXP2101, los viejos el AXP192. Intentamos iniciar el nuevo primero.
+  // --- Inicializar Chip de Energía (Soporta AXP2101 o AXP192) CON PROTECCIÓN ---
   power = new XPowersAXP2101(Wire, OLED_SDA, OLED_SCL);
   if (!power->init()) { 
-    delete power; // Si falla, destruimos el objeto
-    power = new XPowersAXP192(Wire, OLED_SDA, OLED_SCL); // E intentamos con el modelo viejo
-    power->init(); 
+    delete power; 
+    power = new XPowersAXP192(Wire, OLED_SDA, OLED_SCL); 
+    if (!power->init()) {
+      delete power;
+      power = nullptr; // <-- ESTO FALTABA: Si ambos fallan, lo anulamos para evitar el cuelgue
+      Serial.println("Avís: No s'ha trobat xip de bateria AXP");
+    }
   }
-  if (power) power->enableBattVoltageMeasure(); // Le pedimos al chip que mida el voltaje de la batería
+  
+  if (power) {
+    power->enableBattVoltageMeasure(); 
+  }
 
   // Inicialización del GPS
   gpsSer.begin(GPS_BAUD, SERIAL_8N1, GPS_RX, GPS_TX); // Inicia el puerto serie dedicado solo a hablar con la antena GPS
@@ -206,44 +213,45 @@ void setup() {
 // ---------- LOOP: SE EJECUTA EN BUCLE INFINITO ----------
 void loop() {
   // 1. LEER GPS CONSTANTEMENTE
-  // Mientras haya datos crudos llegando desde la antena, se los pasamos a la librería TinyGPS para que los traduzca
+  // Mientras haya datos crudos llegando, se los pasamos a la librería
   while (gpsSer.available()) gps.encode(gpsSer.read());
 
-  // 2. LECTURA DEL BOTÓN (Con filtro Anti-rebotes)
-  static bool lastButtonState = HIGH;      // Guarda el estado del botón en el ciclo anterior
-  static unsigned long lastDebounceTime = 0; // Guarda el momento de la última vez que el botón cambió de estado
-  bool reading; // Variable temporal para la lectura actual
+  // 2. LECTURA DEL BOTÓN (Filtro Anti-rebotes corregido)
+  static bool buttonState = HIGH;             // Estado estable confirmado del botón
+  static bool lastButtonState = HIGH;         // Última lectura (con posible ruido eléctrico)
+  static unsigned long lastDebounceTime = 0;  // Cronómetro del último cambio físico
 
-  reading = digitalRead(BUTTON_PIN); // Leemos el estado físico actual del botón
-  
-  // Si el estado es diferente al del ciclo anterior (alguien lo ha tocado o es ruido eléctrico)
+  bool reading = digitalRead(BUTTON_PIN); // Leemos el pin físicamente
+
+  // Si hay un cambio (alguien lo ha tocado o hay ruido)
   if (reading != lastButtonState) {
     lastDebounceTime = millis(); // Reiniciamos el cronómetro
   }
-  
-  // Si han pasado más de 50 milisegundos desde el último cambio, asumimos que es una pulsación real y no ruido mecánico
-  if ((millis() - lastDebounceTime) > 50) {  
-    // Comprobamos si el estado estable es diferente al estado anterior registrado
-    if (reading != lastButtonState) {
-      // Si la lectura estable es LOW (0 voltios), significa que el botón está presionado a fondo.
-      if (reading == LOW) {
+
+  // Si han pasado 50ms sin que la señal cambie (es una pulsación real y estable)
+  if ((millis() - lastDebounceTime) > 50) {
+    // Si este nuevo estado estable es distinto al que teníamos guardado
+    if (reading != buttonState) {
+      buttonState = reading; // Actualizamos el estado real del botón
+      
+      // Si el estado confirmado es LOW (presionado a fondo)
+      if (buttonState == LOW) {
         Serial.println("PULSACIÓ DETECTADA -> ENVIA SOS!");
-        sendSOS(); // Ejecuta toda la lógica de enviar el mensaje
-        delay(300);  // Pausa adicional para evitar que un dedo tembloroso envíe 2 mensajes seguidos
+        sendSOS();
       }
     }
   }
   
-  lastButtonState = reading; // Actualizamos el estado para la siguiente vuelta del bucle
-  
+  lastButtonState = reading; // Guardamos la lectura para el siguiente ciclo del loop
+
   // 3. ACTUALIZACIÓN PERIÓDICA DE LA PANTALLA
-  static unsigned long lastStatus = 0; // Guarda el tiempo de la última actualización de pantalla
+  static unsigned long lastStatus = 0; 
   
   // Si han pasado 4000 milisegundos (4 segundos)...
   if (millis() - lastStatus > 4000) {
-    lastStatus = millis(); // Reinicia el cronómetro
+    lastStatus = millis(); 
     
-    // Muestra en pantalla el estado del Bluetooth y la ubicación/hora del GPS actualizada
+    // Muestra en pantalla el estado del Bluetooth y la ubicación/hora del GPS
     if (deviceConnected) {
       oledMsg("T-Beam SOS", "BLE CONNECTAT", getGPSInfo().c_str()); 
     } else {
