@@ -101,7 +101,7 @@ String getPowerInfo() {
 
 // ---------- CONFIGURACIÓN DEL BLUETOOTH ----------
 void setupBLE() {
-  BLEDevice::init("TBeam-SOS-Alavaro-Toni"); // Inicializa el chip BLE y le pone el nombre que verás en el móvil
+  BLEDevice::init("TBeam-SOS-Álavaro-Toni"); // Inicializa el chip BLE y le pone el nombre que verás en el móvil
   pServer = BLEDevice::createServer(); // Crea el servidor
   pServer->setCallbacks(new MyServerCallbacks()); // Le asigna las reglas de conexión que creamos arriba
   
